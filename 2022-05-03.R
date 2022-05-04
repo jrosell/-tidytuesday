@@ -1,3 +1,5 @@
+# By @nrennie35: https://github.com/nrennie/tidytuesday/blob/main/2022/2022-05-03/20220503.R
+
 library(tidyverse)
 library(ggstream)
 library(rcartocolor)
@@ -95,6 +97,7 @@ ggplot(data = plot_data,
       margin = margin(t = 20, b = 5)))
 
 
+# By @jrosell: https://github.com/jrosell/tidytuesday/blob/main/2022-05-03.R
 
 # stacked area plot 
 area_plot_data <- plot_data %>%
@@ -114,7 +117,7 @@ ggplot(data = area_plot_data, aes(x = year, y = total_gw, fill = type, col = typ
   scale_y_continuous(position = "right") +
   scale_fill_carto_d(palette = "Bold") +
   scale_colour_carto_d(palette = "Bold") +
-  labs(caption = "N. Rennie | Data: Berkeley Lab",
+  labs(caption = "N. Rennie & Jordi Rosell | Data: Berkeley Lab",
     title = "Energy Capacity in the United States",
     subtitle = st) +
   guides(fill = guide_legend(ncol = 2)) +
