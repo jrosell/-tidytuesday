@@ -135,3 +135,4 @@ ggplot(data = area_plot_data, aes(x = year, y = total_gw, fill = type, col = typ
     plot.caption = element_text(size = 8, hjust = 0, family = "rose",
       margin = margin(t = 20, b = 5))
   )
+
