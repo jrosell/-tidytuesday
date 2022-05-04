@@ -110,7 +110,7 @@ area_plot_data <- plot_data %>%
       total_gw  = rep(0, 4),
     )
   ) %>% 
-  print(n = Inf)
+  mutate(type = factor(type, levels = c("Solar", "Wind", "Storage", "Gas", "Nuclear", "Coal", "Other"))) 
 ggplot(data = area_plot_data, aes(x = year, y = total_gw, fill = type, col = type)) +
   geom_area(aes(fill = type), position = 'stack') +
   scale_x_continuous(limits = c(2014, 2020)) +
