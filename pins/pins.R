@@ -14,20 +14,9 @@ board %>% pins::pin_write(squirrels, "squirrels", type = "rds")
 board %>% pins::pin_list()
 board %>% pins::pin_read("squirrels")
 
-
-
+# Read from github
 github_raw <- function(x) paste0("https://raw.githubusercontent.com/", x)
-
-## with a named vector of URLs to specific pins:
-b1 <- board_url(c(
-  files = github_raw("rstudio/pins-r/main/tests/testthat/pin-files/"),
-  rds = github_raw("rstudio/pins-r/main/tests/testthat/pin-rds/"),
-  raw = github_raw("rstudio/pins-r/main/tests/testthat/pin-files/first.txt")
-))
-
-b1 %>% pin_read("squirrels")
-
 board <- board_url(c(
-  squirrels = "https://raw.githubusercontent.com/jrosell/tidytuesday/main/pins/squirrels/"
+  squirrels = github_raw("jrosell/tidytuesday/main/pins/squirrels/20230210T083753Z-a5873/")
 ))
 board %>% pin_read("squirrels")
