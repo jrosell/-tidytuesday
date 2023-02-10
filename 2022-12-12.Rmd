@@ -1,0 +1,1550 @@
+---
+title: "#TidyTuesday: United States Monthly Retail Sales (MSRS)"
+output:
+  html_document: 
+    toc: true
+editor_options: 
+  chunk_output_type: console
+---
+
+## Explore data
+
+In this week's [#TidyTuesday](https://github.com/rfordatascience/tidytuesday/tree/master/data/2022/2022-12-13), my modelling goal is to build a predictive model to forecast the following three month of change_yoy in the United States Monthly Retail Sales (MSRS).
+
+```{r setup}
+library(tidyverse)
+library(tidymodels)
+library(plotly)
+library(timetk)
+library(lubridate)
+library(modeltime)
+library(forecast)
+library(slider)
+library(rules)
+
+state_retail <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2022/2022-12-13/state_retail.csv',  col_types = "cciciiccc")
+
+data <- state_retail %>% 
+    filter(!is.na(change_yoy)) %>% 
+    mutate(change_yoy = ifelse(change_yoy == "S", 0, change_yoy)) %>%
+    mutate(change_yoy = parse_number(change_yoy)) %>%
+    mutate(date = lubridate::make_date(year,month,1)) %>% 
+    arrange(date) %>% 
+    summarise_by_time(
+        .date_var = date, 
+        .by       = "month",
+        change_yoy    = mean(change_yoy, na.rm = TRUE),
+    ) %>% 
+    pad_by_time(date, .by = "month", .pad_value = NA) %>% 
+    filter_by_time(
+         .date_var   = date, 
+         .start_date = "2019-03-01",
+         .end_date   = "end"
+    ) %>% 
+    print()
+
+```
+
+There's no missing values left.
+
+```{r}
+data %>% 
+  filter(is.na(change_yoy))
+```
+
+That's a plot of the data that I prepared:
+
+```{r}
+p <- data %>%
+    plot_time_series(date, change_yoy, .smooth = FALSE, .interactive = FALSE) +
+    labs(title = "United States Monthly State Retail Sales (MSRS)")
+ggplotly(p)
+```
+
+Some diagnostics:
+
+```{r}
+data %>% tk_summary_diagnostics(.date_var = date)
+```
+
+```{r}
+data %>%
+    plot_seasonal_diagnostics(date, change_yoy)
+```
+
+```{r}
+data %>%
+    mutate(trans_change_yoy = standardize_vec(log(change_yoy + 1))) %>%  
+    filter(!is.na(trans_change_yoy)) %>% 
+    plot_seasonal_diagnostics(date, trans_change_yoy)
+```
+
+
+```{r}
+p <- data %>%
+    plot_stl_diagnostics(date, change_yoy, .frequency = "1 quarter", .trend = "1 year", .interactive = FALSE) +
+    facet_wrap(c(".group"), ncol = 2)
+ggplotly(p)
+```
+
+
+```{r}
+p <- data %>%
+    mutate(trans_change_yoy = standardize_vec(log(change_yoy + 1))) %>%  
+    filter(!is.na(trans_change_yoy)) %>% 
+    plot_stl_diagnostics(date,trans_change_yoy, .frequency = "1 quarter", .trend = "1 year", .interactive = FALSE) +
+    facet_wrap(c(".group"), ncol = 2)
+ggplotly(p)
+```
+
+```{r}
+data %>%
+    plot_acf_diagnostics(date, change_yoy, .lags = 1000)
+```
+
+```{r}
+data %>%
+    mutate(trans_change_yoy = standardize_vec(log(change_yoy + 1))) %>%  
+    filter(!is.na(trans_change_yoy)) %>%
+    plot_acf_diagnostics(date, trans_change_yoy, .lags = 1000)
+```
+
+
+```{r}
+data %>% 
+    plot_anomaly_diagnostics(
+        .date_var = date, 
+        .value    = change_yoy,
+        .alpha    = 0.02,
+        .max_anomalies = 0.1
+    )
+```
+
+Outlier effect before log transformation:
+
+```{r}
+data %>%
+    mutate(trans_change_yoy = change_yoy + 27) %>%  
+    plot_time_series_regression(
+        .date_var = date,
+        change_yoy ~ as.numeric(date) +
+            year(date) +
+            semester(date) +
+            quarter(date) +
+            month(date, label = TRUE),
+        .show_summary = TRUE
+    )
+```
+
+Cleaning before log transformation
+
+```{r}
+data %>%
+    mutate(trans_change_yoy = change_yoy + 27) %>% 
+    mutate(change_yoy_cleaned = ts_clean_vec(trans_change_yoy, period = 1, lambda = "auto"))  %>%
+    select(-change_yoy) %>% 
+    pivot_longer(-date) %>%
+    plot_time_series(date, value, name, .smooth = FALSE)
+```
+
+Outlier effect after log transformation
+
+```{r}
+data %>%
+    mutate(trans_change_yoy = log(change_yoy + 27)) %>%  
+    plot_time_series_regression(
+        .date_var = date,
+        trans_change_yoy ~ as.numeric(date) +
+            year(date) +
+            semester(date) +
+            quarter(date) +
+            month(date, label = TRUE),
+        .show_summary = TRUE
+    )
+```
+
+Cleaning after log transformation
+
+```{r}
+data %>%
+    mutate(trans_change_yoy = log(change_yoy + 27)) %>% 
+    mutate(change_yoy_cleaned = ts_clean_vec(trans_change_yoy, period = 1, lambda = "auto"))  %>%
+    select(-change_yoy) %>% 
+    pivot_longer(-date) %>%
+    plot_time_series(date, value, name, .smooth = FALSE)
+```
+
+Data wrangling:
+
+```{r}
+data %>% 
+    mutate_by_time(
+        .date_var = date,
+        .by = "3 month",
+        change_yoy_mean    = mean(change_yoy),
+        change_yoy_median  = median(change_yoy),
+        change_yoy_max     = max(change_yoy),
+        change_yoy_min     = min(change_yoy)
+    ) %>% 
+    pivot_longer(change_yoy:change_yoy_min) %>%
+    plot_time_series(date, value, .facet_vars = name, .facet_ncol = 2)
+
+```
+
+
+```{r}
+data %>% 
+    mutate(trans_change_yoy = standardize_vec(log(change_yoy + 1))) %>%  
+    filter(!is.na(trans_change_yoy)) %>%
+    mutate_by_time(
+        .date_var = date,
+        .by = "3 month",
+        change_yoy_mean    = mean(trans_change_yoy),
+        change_yoy_median  = median(trans_change_yoy),
+        change_yoy_max     = max(trans_change_yoy),
+        change_yoy_min     = min(trans_change_yoy)
+    ) %>% 
+    pivot_longer(change_yoy:change_yoy_min) %>%
+    plot_time_series(date, value, .facet_vars = name, .facet_ncol = 2)
+
+```
+
+
+
+
+```{r}
+data %>%
+    mutate(trans_change_yoy = standardize_vec(log(change_yoy + 1))) %>%  
+    filter(!is.na(trans_change_yoy)) %>%    
+    plot_time_series_regression(
+        .date_var = date,
+        trans_change_yoy ~ as.numeric(date) +
+            year(date) +
+            semester(date) +
+            quarter(date) +
+            month(date, label = TRUE),
+        .show_summary = TRUE
+    )
+
+```
+
+```{r}
+data %>%
+    mutate(trans_change_yoy = standardize_vec(box_cox_vec(change_yoy))) %>%  
+    plot_time_series_regression(
+        .date_var = date,
+        trans_change_yoy ~ as.numeric(date) +
+            year(date) +
+            # semester(date) +
+            # quarter(date) +
+            month(date, label = TRUE
+        ),
+        .show_summary = TRUE
+    )
+
+```
+
+
+
+Exploring moving average:
+
+```{r}
+p <- data %>%
+  bind_rows(
+    future_frame(., .date_var = date, .length_out = 3)
+  ) %>% 
+  mutate(
+    mavg_3 = slidify_vec(change_yoy, .f = ~ mean(.x, na.rm = TRUE), .period = 3, .align = "right"),
+    mavg_6 = slidify_vec(change_yoy, .f = ~ mean(.x, na.rm = TRUE), .period = 6, .align = "right"),
+    mavg_12 = slidify_vec(change_yoy, .f = ~ mean(.x, na.rm = TRUE), .period = 12, .align = "right")
+  ) %>%
+  fill(mavg_3, .direction = "down") %>%
+  fill(mavg_6, .direction = "down") %>%
+  fill(mavg_12, .direction = "down") %>%
+  pivot_longer(-date) %>%
+  plot_time_series(date, value, name, .smooth = FALSE, .interactive = FALSE) +
+  labs(title = "Moving average: 3 months")
+ggplotly(p)
+```
+
+Exploring lag features:
+
+```{r}
+data %>%
+    tk_augment_lags(.value = change_yoy, .lags = c(1, 3, 12)) %>%
+    drop_na() %>%
+    plot_time_series_regression(
+        date, 
+        .formula = log(change_yoy + 27) ~ 
+          log(change_yoy_lag1 + 27) + 
+          log(change_yoy_lag3 + 27) +
+          log(change_yoy_lag12 + 27),
+        .show_summary = TRUE
+    )
+```
+
+Exploring fourier features:
+
+```{r}
+data %>%
+    tk_augment_fourier(date, .periods = c(1, 3, 12), .K = 3) %>%
+    plot_time_series_regression(
+        date,
+        .formula = log(change_yoy + 27)~ as.numeric(date) + . - date,
+        .show_summary = TRUE
+    )
+
+```
+
+```{r}
+data %>%
+    plot_time_series(
+      date, 
+      log_interval_vec(
+        change_yoy, 
+        limit_lower = 0, # data$change_yoy%>% min() + 27  # 0.460119
+        limit_upper = 116, # data$change_yoy %>% max() + 27 # 115.5917
+        offset      = 27
+      )
+    )
+
+```
+
+
+Explore special dates feature:
+
+```{r}
+
+special_dates_tbl <- tibble(date = tk_make_timeseries("2019-03-01", "2022-08-01", by = "month")) %>%
+    mutate(special = 
+        as.numeric(between_time(date, "2020-03-01", "2020-05-01") |
+        between_time(date, "2021-03-01", "2021-05-01"))
+    ) %>%
+    left_join(data, by = c("date"))
+  
+
+special_dates_tbl %>% 
+  mutate(special = special * 100) %>% 
+  pivot_longer(-date) %>% 
+  plot_time_series(date, value, name, .smooth = FALSE)
+
+
+model_formula <- as.formula(
+    log(change_yoy+27) ~ splines::ns(index.num, knots = quantile(index.num, probs = c(0.25, 0.40)))
+    + .
+    + (as.factor(month) * month.lbl)
+)
+
+special_dates_tbl %>% 
+  tk_augment_timeseries_signature(.date_var = date) %>%
+  select(-diff, -ends_with("iso"), -ends_with(".xts"), -contains("week"), -contains("day"), -contains("hour"), -contains("minute"), -contains("second"), -contains("am.pm")) %>% 
+  plot_time_series_regression(
+        date,
+        .formula = model_formula,
+        .show_summary = TRUE
+    )
+```
+
+Explore trend & seasonality:
+
+```{r}
+msts(data$change_yoy, seasonal.periods = c(3, 6, 12)) %>%
+    mstl() %>%
+    autoplot()
+```
+
+## Build the model
+
+### Data preprocessing
+
+Transform the data and preparing it before spliting it:
+
+```{r}
+limit_lower <- 0
+limit_upper <- 116 
+offset <- 27
+std_mean <- -0.893616623334282
+std_sd <- 0.611192676495043
+horizon <- 3
+lag_period <- 3
+rolling_periods <- c(1, 3, 12)
+
+data_transformed_tbl <- data %>%
+    mutate(trans_change_yoy = log_interval_vec(
+            change_yoy,
+            limit_lower = limit_lower,
+            limit_upper =  limit_upper,
+            offset = offset
+        ) %>% 
+        standardize_vec()
+    ) %>%
+    mutate(cleaned = ts_clean_vec(trans_change_yoy, period = 3)) %>%
+    mutate(trans_change_yoy = ifelse(
+                                date %>% between_time("2020-03-01", "2020-05-01") |
+                                date %>% between_time("2021-03-01", "2021-05-01"), 
+                                 cleaned,
+                                 trans_change_yoy)) %>%
+    select(-change_yoy, -cleaned)
+  
+
+data_prepared_full_tbl <- data_transformed_tbl %>%
+    bind_rows(
+        future_frame(.data = ., .date_var = date, .length_out = horizon)
+    ) %>%
+    tk_augment_lags(trans_change_yoy, .lags = lag_period) %>%
+    tk_augment_slidify(
+        .value   = trans_change_yoy_lag3,
+        .f = mean, 
+        .period  = rolling_periods,
+        .align   = "center",
+        .partial = TRUE
+    ) %>%
+    left_join(special_dates_tbl, by = c("date")) %>% 
+    select(-change_yoy)
+
+
+data_prepared_full_tbl %>%
+    pivot_longer(-date) %>%
+    plot_time_series(date, value, name, .smooth = FALSE)
+
+data_prepared_full_tbl %>% tail(horizon + 1)
+```
+
+
+
+Preparing a time series validation strategy:
+
+```{r}
+data_prepared_tbl <- data_prepared_full_tbl %>%
+    filter(!is.na(trans_change_yoy))
+data_prepared_tbl
+
+forecast_tbl <- data_prepared_full_tbl %>%
+    filter(is.na(trans_change_yoy))
+forecast_tbl
+
+splits <- data_prepared_tbl %>%
+    time_series_split(
+        date_var = date, 
+        assess = "3 months",
+        cumulative = TRUE
+    )
+
+p <- splits %>%
+    tk_time_series_cv_plan() %>%
+    plot_time_series_cv_plan(date, trans_change_yoy, .interactive = FALSE) +
+    labs(title = "Sequential Time Series Initial Split")
+ggplotly(p)
+```
+
+
+Preparing a resample of time series cross-validation:
+
+```{r}
+resamples_tscv_lag <- time_series_cv(
+    data = training(splits),
+    date_var = date,
+    cumulative  = TRUE,
+    initial     = "12 months",
+    assess      = "3 months",
+    slice_limit = 9
+)
+
+p <- resamples_tscv_lag %>%
+    tk_time_series_cv_plan() %>%
+    plot_time_series_cv_plan(date, trans_change_yoy, .interactive = FALSE) +
+    facet_wrap(c(".id")) +
+    labs(title = "Sequential Time Series Cross-Validation")
+ggplotly(p)
+```
+
+```{r}
+set.seed(123)
+resamples_kfold <- vfold_cv(
+    training(splits),
+    v = 9
+)
+
+p <- resamples_kfold %>%
+    tk_time_series_cv_plan() %>%
+    plot_time_series_cv_plan(date, trans_change_yoy, .interactive = FALSE) +
+    facet_wrap(c(".id")) +
+    labs(title = "Sequential Time Series Cross-Validation")
+ggplotly(p)
+```
+
+Save the data:
+
+```{r}
+list(
+        data_prepared_tbl = data_prepared_tbl,
+        forecast_tbl = forecast_tbl,
+        splits = splits,
+        resamples_tscv_lag = resamples_tscv_lag,
+        resamples_kfold = resamples_kfold
+    ) %>% 
+    write_rds("data/data.rds")
+```
+
+### Feature engineering
+
+Calendar features:
+
+```{r}
+recipe_calendar_spec <- recipe(trans_change_yoy ~ ., data = training(splits)) %>%
+    step_timeseries_signature(date) %>%
+    step_rm(
+        ends_with(".iso"),
+        ends_with(".xts"),
+        contains("am.pm"),
+        contains("second"),
+        contains("minute"), 
+        contains("hour"),
+        contains("day"), 
+        contains("week"), 
+    ) %>%
+    step_normalize(
+         ends_with("index.num"), ends_with("_year")
+    ) %>%
+    step_dummy(all_nominal()) %>% 
+    step_interact(~ matches("month") * matches("month.lbl")) %>%
+    step_fourier(date, period = c(1, 3, 12), K = 3)  
+
+recipe_calendar_spec %>% prep() %>% juice() %>% glimpse()
+
+
+recipe_calendar_spec_nolag <- recipe_calendar_spec %>%
+    step_rm(contains("_lag"))
+
+recipe_calendar_spec_lag <- recipe_calendar_spec %>%
+    step_naomit(contains("_lag"))
+
+recipe_calendar_spec_nolag %>% prep() %>% juice() %>% glimpse()
+```
+
+Calendar Spline features
+
+```{r}
+recipe_spec_spline <- recipe_calendar_spec %>%
+    step_rm(date)  %>% 
+    step_ns(ends_with("index.num"), deg_free = 2) %>%
+    step_rm(contains("_lag"))
+
+recipe_spec_spline %>% prep() %>% juice() %>% glimpse()
+
+recipe_spec_spline_nospecial <- recipe_spec_spline %>%
+    step_rm(special)  
+
+recipe_spec_spline_nospecial %>% prep() %>% juice() %>% glimpse()
+```
+
+Calendar Lag features
+
+```{r}
+recipe_spec_lag <- recipe_calendar_spec %>%
+    step_rm(date)  %>% 
+    step_naomit(contains("_lag"))
+
+recipe_spec_lag %>% prep() %>% juice() %>% glimpse()
+
+
+recipe_spec_lag_nospecial <- recipe_spec_lag %>%
+    step_rm(special)  
+
+recipe_spec_lag_nospecial %>% prep() %>% juice() %>% glimpse()
+```
+
+Save the recipes:
+
+```{r}
+list(
+      recipe_calendar_spec = recipe_calendar_spec,
+      recipe_calendar_spec_nolag  = recipe_calendar_spec_nolag,
+      recipe_calendar_spec_lag  = recipe_calendar_spec_lag,
+      recipe_spec_spline  = recipe_spec_spline,
+      recipe_spec_spline_nospecial = recipe_spec_spline_nospecial,
+      recipe_spec_lag = recipe_spec_lag,
+      recipe_spec_lag_nospecial = recipe_spec_lag_nospecial
+  ) %>% 
+  write_rds("data/recipes.rds")
+```
+
+### Model analysis
+
+Fit the models and compare them:
+
+```{r fiting_workflows}
+workflow_lm_spline_nospecial_fit <- recipe_spec_spline_nospecial %>% 
+    workflow(linear_reg(penalty = 0.1) %>%
+    set_engine("glmnet")) %>%
+    fit(training(splits))
+
+workflow_lm_lag_nospecial_fit <- recipe_spec_lag_nospecial %>% 
+    # prep() %>% juice() %>% glimpse() 
+    workflow(linear_reg(penalty = 0.1) %>%
+    set_engine("glmnet")) %>%
+    fit(training(splits))
+
+workflow_lm_spline_fit <- recipe_spec_spline %>% 
+    # prep() %>% juice() %>% glimpse() 
+    workflow(linear_reg(penalty = 0.1) %>%
+    set_engine("glmnet")) %>%
+    fit(training(splits))
+
+workflow_lm_lag_fit <- recipe_spec_lag %>% 
+    # prep() %>% juice() %>% glimpse() 
+    workflow(linear_reg(penalty = 0.1) %>%
+    set_engine("glmnet")) %>%
+    fit(training(splits))
+
+
+workflow_fit_arima_non_seasonal_ar <- 
+  recipe(trans_change_yoy ~ date, data = training(splits)) %>% 
+  #prep() %>% juice() %>% glimpse() 
+  workflow(arima_reg(
+          non_seasonal_ar = 1
+  ) %>%
+  set_engine("arima")) %>%
+  fit(training(splits))
+
+workflow_fit_arima_non_seasonal_differences <- 
+    recipe(trans_change_yoy ~ date, data = training(splits)) %>% 
+    #prep() %>% juice() %>% glimpse() 
+    workflow(arima_reg(
+        non_seasonal_ar = 1,
+        non_seasonal_differences = 1
+    ) %>%
+    set_engine("arima")) %>%
+    fit(training(splits))
+
+workflow_fit_arima_non_seasonal_ma <- 
+    recipe(trans_change_yoy ~ date, data = training(splits)) %>% 
+    #prep() %>% juice() %>% glimpse() 
+    workflow(arima_reg(
+        non_seasonal_ar = 1,
+        non_seasonal_differences = 1,
+        non_seasonal_ma = 1,
+    ) %>%
+    set_engine("arima")) %>%
+    fit(training(splits))
+
+workflow_fit_arima_seasonal <-     
+    recipe(trans_change_yoy ~ date, data = training(splits)) %>% 
+    #prep() %>% juice() %>% glimpse() 
+    workflow(arima_reg(
+        seasonal_period = 3,
+        seasonal_ar = 1,
+        non_seasonal_ar = 1,
+        non_seasonal_differences = 1,
+        non_seasonal_ma = 1,
+    ) %>%
+    set_engine("arima")) %>%
+    fit(training(splits))
+
+workflow_fit_arima_seasonal_differences <- 
+    recipe(trans_change_yoy ~ date, data = training(splits)) %>% 
+    #prep() %>% juice() %>% glimpse() 
+    workflow(arima_reg(
+        seasonal_period = 3,
+        seasonal_ar = 1,
+        seasonal_differences = 1,
+        non_seasonal_ar = 1,
+        non_seasonal_differences = 1,
+        non_seasonal_ma = 1,
+    ) %>%
+    set_engine("arima")) %>%
+    fit(training(splits))
+
+workflow_fit_arima_seasonal_ma <-
+    recipe(trans_change_yoy ~ date, data = training(splits)) %>% 
+    #prep() %>% juice() %>% glimpse() 
+    workflow(arima_reg(
+        seasonal_period = 3,
+        seasonal_ar = 1,
+        seasonal_differences = 1,
+        seasonal_ma = 1,
+        non_seasonal_ar = 1,
+        non_seasonal_differences = 1,
+        non_seasonal_ma = 1,
+    ) %>%
+    set_engine("arima")) %>%
+    fit(training(splits))
+
+workflow_fit_arima_seasonal_2 <- 
+    recipe(trans_change_yoy ~ date, data = training(splits)) %>% 
+    #prep() %>% juice() %>% glimpse() 
+    workflow(arima_reg(
+        seasonal_period = 3,
+        seasonal_ar = 2,
+        seasonal_differences = 1,
+        seasonal_ma = 2,
+        non_seasonal_ar = 1,
+        non_seasonal_differences = 1,
+        non_seasonal_ma = 1
+    ) %>%
+    set_engine("arima")) %>%
+    fit(training(splits))
+
+workflow_fit_auto_arima_baseline <- 
+    recipe(trans_change_yoy ~ date, data = training(splits)) %>% 
+    workflow(arima_reg() %>% 
+    set_engine("auto_arima")) %>%
+    fit(training(splits))
+
+workflow_fit_auto_arima_fourier <- 
+    recipe(trans_change_yoy ~ date, data = training(splits)) %>%
+    step_fourier(date, period = 3, K = 3) %>%
+    step_fourier(date, period = 12, K = 3) %>% 
+    #prep() %>% juice() %>% glimpse() 
+    workflow(arima_reg() %>% 
+    set_engine("auto_arima")) %>%
+    fit(training(splits))
+
+workflow_fit_auto_arima_fourier_events <- 
+    recipe(trans_change_yoy ~ date + special, data = training(splits)) %>%
+    step_fourier(date, period = 3, K = 3) %>%
+    step_fourier(date, period = 12, K = 3) %>% 
+    #prep() %>% juice() %>% glimpse() 
+    workflow(arima_reg() %>% 
+    set_engine("auto_arima")) %>%
+    fit(training(splits))
+
+workflow_fit_auto_arima_label <- 
+    recipe(trans_change_yoy ~ date + special, data = training(splits)) %>%
+    step_fourier(date, period = 3, K = 3) %>%
+    step_fourier(date, period = 12, K = 3) %>% 
+    step_date(date, features = "month", label = TRUE) %>% 
+    step_date(date, features = "year", label = FALSE) %>% 
+    #prep() %>% juice() %>% glimpse() 
+    workflow(arima_reg() %>%
+    set_engine("auto_arima")) %>%
+    fit(training(splits))
+
+
+workflow_fit_prophet <- 
+    recipe(trans_change_yoy ~ date, data = training(splits)) %>%
+    #prep() %>% juice() %>% glimpse() 
+    workflow(prophet_reg(
+        changepoint_num    = 25,
+        changepoint_range  = 0.8,
+        seasonality_yearly = TRUE,
+        seasonality_weekly = FALSE,
+        seasonality_daily = FALSE
+    ) %>%
+    set_engine("prophet")) %>%
+    fit(training(splits))
+
+workflow_fit_prophet_xregs <-
+    recipe(trans_change_yoy ~ date + special, data = training(splits)) %>%
+    #prep() %>% juice() %>% glimpse() 
+    workflow(prophet_reg(
+        changepoint_num    = 25,
+        changepoint_range  = 0.8,
+        seasonality_yearly = TRUE,
+        seasonality_weekly = FALSE,
+        seasonality_daily = FALSE) %>%
+    set_engine("prophet")) %>%
+    fit(training(splits))
+
+workflow_fit_ets <- 
+    recipe(trans_change_yoy ~ date, data = training(splits)) %>%
+    #prep() %>% juice() %>% glimpse() 
+    workflow(exp_smoothing(
+        error = "additive",
+        trend = "additive",
+        season = "additive"
+    ) %>%
+    set_engine("ets")) %>%
+    fit(data = training(splits))
+
+workflow_fit_tbats <- 
+    recipe(trans_change_yoy ~ date, data = training(splits)) %>%
+    #prep() %>% juice() %>% glimpse() 
+    workflow(seasonal_reg(
+        seasonal_period_1 = 3,
+        seasonal_period_2 = 6,
+        seasonal_period_3 = 12
+    ) %>%
+    set_engine("tbats")) %>%
+    fit(training(splits))
+
+workflow_fit_stlm_ets <- 
+    recipe(trans_change_yoy ~ date, data = training(splits)) %>%
+    #prep() %>% juice() %>% glimpse() 
+    workflow(seasonal_reg(
+        seasonal_period_1 = 3,
+        seasonal_period_2 = 6,
+        seasonal_period_3 = 12
+    ) %>%
+    set_engine("stlm_ets")) %>%
+    fit(training(splits))
+
+workflow_fit_stlm_arima <- 
+   recipe(trans_change_yoy ~ date, data = training(splits)) %>%
+    #prep() %>% juice() %>% glimpse() 
+    workflow(seasonal_reg(
+        seasonal_period_1 = 3,
+        seasonal_period_2 = 6,
+        seasonal_period_3 = 12
+    ) %>%
+    set_engine("stlm_arima")) %>%
+    fit(training(splits))
+
+
+workflow_fit_stlm_arima_xregs <- 
+    recipe(trans_change_yoy ~ date + special, data = training(splits)) %>%
+    #prep() %>% juice() %>% glimpse() 
+    workflow(seasonal_reg(
+        seasonal_period_1 = 3,
+        seasonal_period_2 = 6,
+        seasonal_period_3 = 12
+    ) %>%
+    set_engine("stlm_arima")) %>%
+    fit(data = training(splits))
+
+model_spec_mars <- mars(
+        mode = "regression",
+        num_terms = 10
+    ) %>%
+    set_engine("earth", endspan = 24)
+
+workflow_fit_mars_simple <- workflow() %>%
+    add_model(model_spec_mars) %>%
+    add_recipe(
+        recipe = recipe(trans_change_yoy ~ date, data = training(splits)) %>%
+            step_mutate(date = as.numeric(date))
+    ) %>%
+    fit(training(splits))
+
+workflow_fit_mars_spline <- workflow() %>%
+    add_model(model_spec_mars) %>%
+    add_recipe(recipe_spec_spline) %>%
+    fit(training(splits))
+
+workflow_fit_mars_lag <- workflow() %>%
+    add_model(model_spec_mars) %>%
+    add_recipe(recipe_spec_lag) %>%
+    fit(training(splits))
+
+
+model_spec_svm_poly <- svm_poly(
+        mode = "regression", 
+        cost = 10, 
+        degree = 1,
+        scale_factor = 1,
+        margin = 0.1
+    ) %>%
+    set_engine("kernlab")
+
+set.seed(123)
+workflow_fit_svm_poly_spline <- workflow() %>%
+    add_model(model_spec_svm_poly) %>%
+    add_recipe(recipe_spec_spline) %>%
+    fit(training(splits))
+ 
+set.seed(123)
+workflow_fit_svm_poly_lag <- workflow() %>%
+    add_model(model_spec_svm_poly) %>%
+    add_recipe(recipe_spec_lag) %>%
+    fit(training(splits))
+
+model_spec_svm_rbf <- svm_rbf(
+        mode = "regression",
+        cost = 1, 
+        rbf_sigma = 0.01,
+        margin = 0.1
+    ) %>%
+    set_engine("kernlab")
+
+workflow_fit_svm_rbf_spline <- workflow() %>%
+    add_model(model_spec_svm_rbf) %>%
+    add_recipe(recipe_spec_spline) %>%
+    fit(training(splits))
+
+workflow_fit_svm_rbf_lag <- workflow_fit_svm_rbf_spline %>%
+    update_recipe(recipe_spec_lag) %>%
+    fit(training(splits))
+
+ 
+model_spec_knn <- nearest_neighbor(
+    mode = "regression",
+    neighbors = 50, 
+    dist_power = 10, 
+    weight_func = "optimal"
+) %>%
+    set_engine("kknn")
+
+set.seed(123)
+workflow_fit_knn_spline <- workflow() %>%
+    add_model(model_spec_knn) %>%
+    add_recipe(recipe_spec_spline) %>%
+    fit(training(splits))
+
+set.seed(123)
+workflow_fit_knn_lag <- workflow_fit_knn_spline %>%
+    update_recipe(recipe_spec_lag) %>%
+    fit(training(splits))
+
+
+model_spec_rf <- rand_forest(
+        mode = "regression", 
+        mtry = 25, 
+        trees = 1000, 
+        min_n = 25
+    ) %>%
+    set_engine("ranger")
+
+set.seed(123)
+workflow_fit_rf_spline <- workflow() %>%
+    add_model(model_spec_rf) %>%
+    add_recipe(recipe_spec_spline) %>%
+    fit(training(splits))
+
+set.seed(123)
+workflow_fit_rf_lag <- workflow_fit_rf_spline %>%
+    update_recipe(recipe_spec_lag) %>%
+    fit(training(splits))
+
+
+model_spec_boost <- boost_tree(
+        mode = "regression",
+        mtry = 25, 
+        trees = 1000, 
+        min_n = 2, 
+        tree_depth = 12, 
+        learn_rate = 0.3, 
+        loss_reduction = 0
+    ) %>%
+    set_engine("xgboost")
+
+set.seed(123)
+workflow_fit_xgboost_spline <- workflow() %>%
+    add_model(model_spec_boost) %>%
+    add_recipe(recipe_spec_spline) %>%
+    fit(training(splits))
+
+set.seed(123)
+workflow_fit_xgboost_lag <- workflow_fit_xgboost_spline %>%
+    update_recipe(recipe_spec_lag) %>%
+    fit(training(splits))
+
+model_spec_cubist <- cubist_rules(
+        committees = 50, 
+        neighbors = 7, 
+        max_rules = 100
+    ) %>%
+    set_engine("Cubist")
+
+set.seed(123)
+workflow_fit_cubist_spline <- workflow() %>%
+    add_model(model_spec_cubist) %>%
+    add_recipe(recipe_spec_spline) %>%
+    fit(training(splits))
+
+set.seed(123)
+workflow_fit_cubist_lag <- workflow_fit_cubist_spline %>%
+    update_recipe(recipe_spec_lag) %>%
+    fit(training(splits))
+
+model_spec_nnet <- mlp(
+        mode = "regression",
+        hidden_units = 9,
+        penalty = 1, 
+        epochs = 100
+    ) %>%
+    set_engine("nnet")
+
+set.seed(123)
+workflow_fit_nnet_spline <- workflow() %>%
+    add_model(model_spec_nnet) %>%
+    add_recipe(recipe_spec_spline) %>%
+    fit(training(splits))
+
+set.seed(123)
+workflow_fit_nnet_lag <- workflow_fit_nnet_spline %>%
+    update_recipe(recipe_spec_lag) %>%
+    fit(training(splits))
+
+model_spec_nnetar <- nnetar_reg(
+        non_seasonal_ar = 3,
+        seasonal_ar     = 1,
+        hidden_units    = 9,
+        penalty         = 10,
+        num_networks    = 10,
+        epochs          = 50
+    ) %>%
+    set_engine("nnetar")
+
+set.seed(123)
+workflow_fit_nnetar_base <- workflow() %>%
+    add_model(model_spec_nnetar) %>%
+    add_recipe(recipe_calendar_spec) %>%
+    fit(training(splits) %>% drop_na())
+
+model_spec_prophet_boost <- prophet_boost(
+        changepoint_num    = 25,
+        changepoint_range  = 0.8,
+        seasonality_daily  = FALSE,
+        seasonality_weekly = FALSE, 
+        seasonality_yearly = FALSE, 
+        mtry           = 0.75,
+        min_n          = 20, 
+        tree_depth     = 3, 
+        learn_rate     = 0.2, 
+        loss_reduction = 0.15, 
+        trees          = 300
+    ) %>%
+    set_engine("prophet_xgboost", counts = FALSE)
+
+set.seed(123)
+workflow_fit_prophet_boost <- workflow() %>%
+    add_model(model_spec_prophet_boost) %>%
+    add_recipe(recipe_calendar_spec_nolag) %>%
+    fit(training(splits))
+
+model_spec_arima_boost <- arima_boost(
+        non_seasonal_ar = 1,
+        non_seasonal_differences = 1,
+        mtry           = 0.75,
+        min_n          = 20,
+        tree_depth     = 3,
+        learn_rate     = 0.25,
+        loss_reduction = 0.15,
+        trees          = 300
+    ) %>% 
+    set_engine(
+        "auto_arima_xgboost", 
+        counts = FALSE
+    )
+    
+set.seed(123)
+workflow_fit_arima_boost <- workflow_fit_prophet_boost %>%
+    update_model(model_spec_arima_boost) %>%
+    fit(training(splits))
+```
+
+```{r workflows_accuracy}
+models_tbl <- modeltime_table(
+        workflow_lm_spline_nospecial_fit,
+        workflow_lm_lag_nospecial_fit,
+        workflow_lm_spline_fit,
+        workflow_lm_lag_fit,
+        workflow_fit_arima_non_seasonal_ar,
+        workflow_fit_arima_non_seasonal_differences,
+        workflow_fit_arima_non_seasonal_ma,
+        workflow_fit_arima_seasonal,
+        workflow_fit_arima_seasonal_differences,
+        workflow_fit_arima_seasonal_ma,
+        workflow_fit_arima_seasonal_2,
+        workflow_fit_auto_arima_baseline,
+        workflow_fit_auto_arima_fourier,
+        workflow_fit_auto_arima_fourier_events,
+        workflow_fit_auto_arima_label,
+        workflow_fit_prophet,
+        workflow_fit_prophet_xregs,
+        workflow_fit_ets,
+        workflow_fit_tbats,
+        workflow_fit_stlm_ets,
+        workflow_fit_stlm_arima,
+        workflow_fit_stlm_arima_xregs,
+        workflow_fit_mars_simple,
+        workflow_fit_mars_spline,
+        workflow_fit_mars_lag,
+        workflow_fit_svm_poly_spline,
+        workflow_fit_svm_poly_lag,
+        workflow_fit_svm_rbf_spline,
+        workflow_fit_svm_rbf_lag,
+        workflow_fit_knn_spline,
+        workflow_fit_knn_lag,
+        workflow_fit_rf_spline,
+        workflow_fit_rf_lag,
+        workflow_fit_xgboost_spline,
+        workflow_fit_xgboost_lag,
+        workflow_fit_cubist_spline,
+        workflow_fit_cubist_lag,
+        workflow_fit_nnet_spline,
+        workflow_fit_nnet_lag,
+        workflow_fit_nnetar_base,
+        workflow_fit_arima_boost,
+        workflow_fit_prophet_boost
+    ) %>% 
+    update_modeltime_description(1, "LM_workflow_lm_spline_nospecial_fit") %>% 
+    update_modeltime_description(2, "LM_workflow_lm_lag_nospecial_fit") %>% 
+    update_modeltime_description(3, "LM_workflow_lm_spline_fit") %>% 
+    update_modeltime_description(4, "LM_workflow_lm_lag_fit") %>% 
+    update_modeltime_description(5, "ARIMA_workflow_fit_arima_non_seasonal_ar") %>% 
+    update_modeltime_description(6, "ARIMA_workflow_fit_arima_non_seasonal_differences") %>% 
+    update_modeltime_description(7, "ARIMA_workflow_fit_arima_non_seasonal_ma") %>% 
+    update_modeltime_description(8, "ARIMA_workflow_fit_arima_seasonal") %>% 
+    update_modeltime_description(9, "ARIMA_workflow_fit_arima_seasonal_differences") %>% 
+    update_modeltime_description(10, "ARIMA_workflow_fit_arima_seasonal_ma") %>% 
+    update_modeltime_description(11, "ARIMA_workflow_fit_arima_seasonal_2") %>% 
+    update_modeltime_description(12, "ARIMA_workflow_fit_auto_arima_baseline") %>% 
+    update_modeltime_description(13, "ARIMA_workflow_fit_auto_arima_fourier") %>% 
+    update_modeltime_description(14, "ARIMA_workflow_fit_auto_arima_fourier_events") %>% 
+    update_modeltime_description(15, "ARIMA_workflow_fit_auto_arima_label") %>% 
+    update_modeltime_description(16, "PROPHET_workflow_fit_prophet") %>% 
+    update_modeltime_description(17, "PROPHET_workflow_fit_prophet_xregs") %>% 
+    update_modeltime_description(18, "ES_workflow_fit_ets") %>% 
+    update_modeltime_description(19, "ES_workflow_fit_tbats") %>% 
+    update_modeltime_description(20, "ES_workflow_fit_stlm_ets") %>% 
+    update_modeltime_description(21, "ES_workflow_fit_stlm_arima") %>% 
+    update_modeltime_description(22, "ES_workflow_fit_stlm_arima_xregs") %>% 
+    update_modeltime_description(23, "MARS_workflow_fit_mars_simple") %>% 
+    update_modeltime_description(24, "MARS_workflow_fit_mars_spline") %>% 
+    update_modeltime_description(25, "MARS_workflow_fit_mars_lag") %>% 
+    update_modeltime_description(26, "SVM_workflow_fit_svm_poly_spline") %>% 
+    update_modeltime_description(27, "SVM_workflow_fit_svm_poly_lag") %>% 
+    update_modeltime_description(28, "SVM_workflow_fit_svm_rbf_spline") %>% 
+    update_modeltime_description(29, "SVM_workflow_fit_svm_rbf_lag") %>% 
+    update_modeltime_description(30, "KNN_workflow_fit_knn_spline") %>% 
+    update_modeltime_description(31, "KNN_workflow_fit_knn_lag") %>% 
+    update_modeltime_description(32, "RF_workflow_fit_rf_spline") %>% 
+    update_modeltime_description(33, "RF_workflow_fit_rf_lag") %>% 
+    update_modeltime_description(34, "XGBOOST_workflow_fit_xgboost_spline") %>% 
+    update_modeltime_description(35, "XGBOOST_workflow_fit_xgboost_lag") %>% 
+    update_modeltime_description(36, "CUBIST_workflow_fit_cubist_spline") %>% 
+    update_modeltime_description(37, "CUBIST_workflow_fit_cubist_lag") %>% 
+    update_modeltime_description(38, "NNET_workflow_fit_nnet_spline") %>% 
+    update_modeltime_description(39, "NNET_workflow_fit_nnet_lag") %>% 
+    update_modeltime_description(40, "NNET_workflow_fit_nnetar_base")  %>% 
+    update_modeltime_description(41, "BOOST_workflow_fit_arima_boost")  %>% 
+    update_modeltime_description(42, "BOOST_workflow_fit_prophet_boost")
+
+calibration_tbl <- models_tbl %>%
+    modeltime_calibrate(
+        new_data = testing(splits)
+    )
+
+calibration_tbl %>%
+    modeltime_forecast(
+      new_data    = testing(splits),
+      actual_data = data_prepared_tbl
+    ) %>%
+    plot_modeltime_forecast()
+
+calibration_tbl %>%
+    modeltime_accuracy() 
+
+calibration_tbl %>%
+    modeltime_accuracy() %>% 
+    arrange(mae) %>% 
+    print(n = Inf)
+
+
+write_rds(calibration_tbl, "data/calibration_tbl.rds")
+
+```
+
+Best model for each model type:
+
+```{r}
+rmse_models <- calibration_tbl %>%
+    modeltime_accuracy() %>% 
+    arrange(rmse) %>% 
+    group_by(.model_type = str_extract(.model_desc, "(.+)_(model|workflow)(.+)", group = 1)) %>% 
+    summarise(
+      .model_id = first(.model_id),
+      .model_desc = first(.model_desc),
+       mae = first(mae),
+       rmse = first(rmse),
+       rsq = first(rsq)
+    )
+mae_models <- calibration_tbl %>%
+    modeltime_accuracy() %>% 
+    arrange(mae) %>% 
+    group_by(.model_type = str_extract(.model_desc, "(.+)_(model|workflow)(.+)", group = 1)) %>% 
+    summarise(
+      .model_id = first(.model_id),
+      .model_desc = first(.model_desc),
+       mae = first(mae),
+       rmse = first(rmse),
+       rsq = first(rsq)
+    )
+
+bind_rows(
+        rmse_models,
+        mae_models
+    ) %>% 
+    distinct() %>% 
+    arrange(.model_type)
+
+bind_rows(
+        rmse_models,
+        mae_models
+    ) %>% 
+    distinct() %>% 
+    arrange(mae)
+
+# c(38, 12, 21, 41, 32)
+
+```
+
+Residuals
+
+```{r}
+residuals_out_tbl <- calibration_tbl %>%
+    modeltime_residuals()
+residuals_out_tbl %>% 
+    plot_modeltime_residuals(
+        .y_intercept = 0,
+        .y_intercept_color = "blue"
+    )
+
+residuals_in_tbl <- calibration_tbl %>%
+    modeltime_residuals(
+        training(splits) %>% drop_na()
+    )
+residuals_in_tbl %>% plot_modeltime_residuals(
+        .y_intercept = 0,
+        .y_intercept_color = "blue"
+    )
+residuals_in_tbl %>%
+    plot_modeltime_residuals(
+        .type = "acf"
+    )
+
+residuals_in_tbl %>%
+    plot_modeltime_residuals(
+        .type = "seasonality"
+    )
+```
+
+## Tuning
+
+### Sequential
+- ARIMA
+- Exponential Smoothing (ETS, TBATS)
+- NNETAR
+
+```{r}
+model_spec_nnetar <- nnetar_reg(
+        seasonal_period = 3,
+        non_seasonal_ar = tune(id = "non_seasonal_ar"),
+        seasonal_ar     = tune(),
+        hidden_units    = tune(),
+        num_networks    = 10,
+        penalty         = tune(),
+        epochs          = 50
+    ) %>%
+    set_engine("nnetar")
+
+extract_parameter_set_dials(model_spec_nnetar)
+
+# Round 1
+set.seed(123)
+grid_spec_nnetar_1 <- grid_latin_hypercube(
+    extract_parameter_set_dials(model_spec_nnetar),
+    size = 15
+)
+grid_spec_nnetar_1
+
+# Round 2
+set.seed(123)
+grid_spec_nnetar_2 <- grid_latin_hypercube(
+    non_seasonal_ar(range = c(1, 4)),
+    seasonal_ar(range = c(1, 1)),
+    hidden_units(range = c(4, 6)),
+    penalty(range = c(-8, -5), trans = scales::log10_trans()),
+    size = 15
+)
+grid_spec_nnetar_2
+
+wflw_tune_nnetar <- workflow_fit_nnetar_base %>%
+    update_recipe(recipe_calendar_spec_lag) %>%
+    update_model(model_spec_nnetar)
+```
+
+```{r nnetar_tune, eval=FALSE, include=TRUE}
+#  nnetar_tune
+tictoc::tic()
+set.seed(123)
+tune_results_nnetar_2 <- wflw_tune_nnetar %>%
+    tune_grid(
+        resamples = resamples_tscv_lag,
+        grid      = grid_spec_nnetar_2,
+        metrics   = default_forecast_accuracy_metric_set(),
+        control   = control_grid(verbose = TRUE, save_pred = TRUE)
+    )
+g <- tune_results_nnetar_2 %>%
+    autoplot() +
+    geom_smooth(se = FALSE)
+ggplotly(g)
+tune_results_nnetar_2 %>% show_best(metric = "rmse", n = Inf)
+tictoc::toc()
+```
+
+
+```{r nnetar_finalize, eval=FALSE, include=TRUE}
+# nnetar_finalize
+workflow_fit_nnetar_tscv <- wflw_tune_nnetar %>%
+    finalize_workflow(
+        tune_results_nnetar_2 %>% 
+            show_best(metric = "rmse", n = Inf) %>%
+            dplyr::slice(1)
+    ) %>%
+    fit(training(splits))
+
+write_rds(workflow_fit_nnetar_tscv, "data/workflow_fit_nnetar_tscv.rds")
+```
+
+### Non-Sequential Algorithms
+
+GLMNet
+XGBoost
+Prophet
+PROPHET BOOST 
+
+
+```{r prophet_boost}
+model_spec_prophet_boost <- prophet_boost(
+        changepoint_num    = 24,
+        changepoint_range  = 0.8,
+        seasonality_yearly = FALSE,
+        seasonality_weekly = FALSE,
+        seasonality_daily  = FALSE,
+        mtry           = tune(),
+        trees          = 300,
+        min_n          = tune(),
+        tree_depth     = tune(),
+        learn_rate     = tune(),
+        loss_reduction = tune()
+    ) %>%
+    set_engine("prophet_xgboost")
+
+# Round 1
+set.seed(123)
+grid_spec_prophet_boost_1 <- grid_latin_hypercube(
+    parameters(model_spec_prophet_boost) %>%
+        update(
+            mtry = mtry(range = c(1, 65))
+        ), 
+    size = 15
+)
+
+# Round 2
+set.seed(123)
+grid_spec_prophet_boost_2 <- grid_latin_hypercube(
+    mtry(range = c(2, 50)),
+    min_n(range = c(1, 13)),
+    tree_depth(range = c(2, 12)),
+    learn_rate(range = c(-3, -1), trans = scales::log10_trans()),
+    loss_reduction(range = c(-5, 1), trans = scales::log10_trans()),
+    size = 15
+)
+
+# Round 3
+set.seed(123)
+grid_spec_prophet_boost_3 <- grid_latin_hypercube(
+    mtry(range = c(9, 36)),
+    min_n(range = c(1, 5)),
+    tree_depth(range = c(2, 12)),
+    learn_rate(range = c(-2.5, -1.7)),
+    loss_reduction(range = c(-5, 1), trans = scales::log10_trans()),
+    size = 15
+)
+
+```
+
+```{r prophet_boost_tune, eval=FALSE, include=FALSE}
+# prophet_boost_tune
+tictoc::tic()
+set.seed(123)
+tune3_results_prophet_boost_kfold <- workflow_fit_prophet_boost %>%
+    update_model(model_spec_prophet_boost) %>%
+    tune_grid(
+        resamples = resamples_kfold,
+        grid      = grid_spec_prophet_boost_3,
+        metrics   = default_forecast_accuracy_metric_set(),
+        control   = control_grid(verbose = FALSE, save_pred = TRUE)
+    )
+g <- tune3_results_prophet_boost_kfold %>%
+    autoplot() +
+    geom_smooth(se = FALSE)
+ggplotly(g)
+tune3_results_prophet_boost_kfold %>% show_best(metric = "rmse", n = Inf)
+tictoc::toc()
+```
+
+
+```{r prophet_boost_finalize, eval=FALSE, include=TRUE}
+# prophet_boost_finalize
+set.seed(123)
+workflow_fit_prophet_boost_kfold_rmse <- workflow_fit_prophet_boost %>%
+    update_model(model_spec_prophet_boost) %>%
+    finalize_workflow(
+        tune2_results_prophet_boost_kfold %>%
+            show_best(metric = "rmse") %>%
+            dplyr::slice(1)
+    ) %>%
+    fit(training(splits))
+write_rds(workflow_fit_prophet_boost_kfold_rmse, "data/workflow_fit_prophet_boost_kfold_rmse.rds")
+
+
+set.seed(123)
+workflow_fit_prophet_boost_kfold_rsq <- workflow_fit_prophet_boost %>%
+    update_model(model_spec_prophet_boost) %>%
+    finalize_workflow(
+        tune2_results_prophet_boost_kfold %>%
+            show_best(metric = "rsq") %>%
+            dplyr::slice(1)
+    ) %>%
+    fit(training(splits))
+write_rds(workflow_fit_prophet_boost_kfold_rsq, "data/workflow_fit_prophet_boost_kfold_rsq.rds")
+```
+
+
+TODO: Use workflows instead of models to fit_resamples all the models and get their CV accuracy.
+
+
+```{r cross_validate, eval=FALSE, include=TRUE}
+# cross_validate
+workflow_fit_nnetar_tscv <- read_rds("data/workflow_fit_nnetar_tscv.rds")
+workflow_fit_prophet_boost_kfold_rmse <- read_rds("data/workflow_fit_prophet_boost_kfold_rmse.rds")
+workflow_fit_prophet_boost_kfold_rsq <- read_rds("data/workflow_fit_prophet_boost_kfold_rsq.rds")
+
+my_models <- as_workflow_set(
+    lm_lag_nospecial_fit = workflow_lm_lag_nospecial_fit,
+    arima_non_seasonal_differences = workflow_fit_arima_non_seasonal_differences,
+    auto_arima_baseline = workflow_fit_auto_arima_baseline,
+    prophet = workflow_fit_prophet,
+    ets = workflow_fit_ets,
+    stlm_arima = workflow_fit_stlm_arima,
+    mars_lag = workflow_fit_mars_lag,
+    svm_rbf_spline = workflow_fit_svm_rbf_spline,
+    knn_lag = workflow_fit_knn_lag,
+    rf_spline = workflow_fit_rf_spline,
+    xgboost_spline = workflow_fit_xgboost_spline,
+    cubist_lag = workflow_fit_cubist_lag,
+    nnet_spline = workflow_fit_nnet_spline,
+    nnetar_base = workflow_fit_nnetar_base,
+    arima_boost = workflow_fit_arima_boost,
+    nnetar_tscv = workflow_fit_nnetar_tscv,
+    prophet_boost_kfold_rmse = workflow_fit_prophet_boost_kfold_rmse,
+    prophet_boost_kfold_rsq = workflow_fit_prophet_boost_kfold_rsq
+)
+my_models_res <- my_models %>% 
+   # The first argument is a function name from the {{tune}} package
+   # such as `tune_grid()`, `fit_resamples()`, etc.
+   workflow_map("fit_resamples",
+        resamples = resamples_tscv_lag, 
+        metrics = default_forecast_accuracy_metric_set(),
+        verbose = TRUE
+    )
+
+write_rds(my_models_res, "data/my_models_res.rds")
+```
+
+```{r}
+my_models_res <- read_rds("data/my_models_res.rds")
+my_models_res %>% collect_metrics() %>%  
+  pivot_wider(wflow_id, names_from = .metric, values_from = mean) %>% 
+  arrange(mae)
+```
+
+## Forecast
+
+```{r forecast}
+workflow_fit_nnetar_tscv <- read_rds("data/workflow_fit_nnetar_tscv.rds")
+workflow_fit_prophet_boost_kfold_rmse <- read_rds("data/workflow_fit_prophet_boost_kfold_rmse.rds")
+workflow_fit_prophet_boost_kfold_rsq <- read_rds("data/workflow_fit_prophet_boost_kfold_rsq.rds")
+
+models_tbl <- modeltime_table(
+        workflow_lm_lag_nospecial_fit,
+        workflow_fit_arima_non_seasonal_differences,
+        workflow_fit_auto_arima_baseline,
+        workflow_fit_prophet,
+        workflow_fit_ets,
+        workflow_fit_stlm_arima,
+        workflow_fit_mars_lag,
+        workflow_fit_svm_rbf_spline,
+        workflow_fit_knn_lag,
+        workflow_fit_rf_spline,
+        workflow_fit_xgboost_spline,
+        workflow_fit_cubist_lag,
+        workflow_fit_nnet_spline,
+        workflow_fit_nnetar_base,
+        workflow_fit_arima_boost,
+        workflow_fit_nnetar_tscv,
+        workflow_fit_prophet_boost_kfold_rmse,
+        workflow_fit_prophet_boost_kfold_rsq
+    ) %>%  
+    update_modeltime_description(1, "workflow_lm_lag_nospecial_fit") %>%
+    update_modeltime_description(2, "workflow_fit_arima_non_seasonal_differences") %>%
+    update_modeltime_description(3, "workflow_fit_auto_arima_baseline") %>%
+    update_modeltime_description(4, "workflow_fit_prophet") %>%
+    update_modeltime_description(5, "workflow_fit_ets") %>%
+    update_modeltime_description(6, "workflow_fit_stlm_arima") %>%
+    update_modeltime_description(7, "workflow_fit_mars_lag") %>%
+    update_modeltime_description(8, "workflow_fit_svm_rbf_spline") %>%
+    update_modeltime_description(9, "workflow_fit_knn_lag") %>%
+    update_modeltime_description(10, "workflow_fit_rf_spline") %>%
+    update_modeltime_description(11, "workflow_fit_xgboost_spline") %>%
+    update_modeltime_description(12, "workflow_fit_cubist_lag") %>%
+    update_modeltime_description(13, "workflow_fit_nnet_spline") %>%
+    update_modeltime_description(14, "workflow_fit_nnetar_base") %>%
+    update_modeltime_description(15, "workflow_fit_arima_boost") %>%
+    update_modeltime_description(16, "workflow_fit_nnetar_tscv") %>%
+    update_modeltime_description(17, "workflow_fit_prophet_boost_kfold_rmse") %>%
+    update_modeltime_description(18, "workflow_fit_prophet_boost_kfold_rsq")
+
+
+calibration_tbl <- models_tbl %>%
+    modeltime_calibrate(
+        new_data = testing(splits)
+    )
+
+
+refit_tbl <- calibration_tbl %>%
+    modeltime_refit(data = data_prepared_tbl)
+
+future_forecast_tbl <- refit_tbl %>%
+    modeltime_forecast(new_data    = bind_rows(testing(splits), forecast_tbl),
+                       actual_data = data_prepared_tbl) %>%
+    
+    mutate(across(.value:.conf_hi, .fns = ~ standardize_inv_vec(
+        x    = .,
+        mean = std_mean,
+        sd   = std_sd
+    ))) %>%
+    mutate(across(.value:.conf_hi, .fns = ~ log_interval_inv_vec(
+        x           = ., 
+        limit_lower = limit_lower, 
+        limit_upper = limit_upper, 
+        offset      = offset
+    )))
+
+data %>% 
+  pivot_longer(-date) %>% 
+  transmute(.model_id = NA, .model_desc = "ORIGINAL", .key = name, .index = date, .value = value, .conf_lo = NA, .conf_hi = NA) %>% 
+  bind_rows(future_forecast_tbl) %>% 
+  plot_modeltime_forecast() 
+
+future_forecast_tbl <- future_forecast_tbl %>% 
+    mutate(
+      .value = ifelse(
+          .index %>% between_time("2020-03-01", "2020-05-01") |
+          .index %>% between_time("2021-03-01", "2021-05-01"),
+          NA,
+          .value
+        )
+    )
+
+restore_tbl <- future_forecast_tbl %>%
+    filter(is.na(.value)) %>%
+    left_join(data, by = c(".index" = "date")) %>%
+    mutate(.value = change_yoy) %>%
+    select(-change_yoy)
+
+future_forecast_tbl <- future_forecast_tbl %>%
+    filter(!is.na(.value)) %>%
+    bind_rows(restore_tbl)
+
+data %>% 
+  pivot_longer(-date) %>% 
+  transmute(.model_id = NA, .model_desc = "ORIGINAL", .key = name, .index = date, .value = value, .conf_lo = NA, .conf_hi = NA) %>% 
+  bind_rows(future_forecast_tbl) %>% 
+  plot_modeltime_forecast() 
+```
+
+

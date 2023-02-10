@@ -1,0 +1,9 @@
+file: squirrels.rds
+file_size: 5929379
+pin_hash: a587305295ddeec3
+type: rds
+title: 'squirrels: a pinned 254355 x 62 data frame'
+description: ~
+tags: ~
+created: 20230210T082605Z
+api_version: 1.0

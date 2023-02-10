@@ -1,0 +1,186 @@
+---
+title: "project-feederwatch"
+author: "Jordi Rosell"
+date: "2023-01-19"
+output: html_document
+---
+
+This week’s #TidyTuesday dataset on Project FeederWatch is a citizen science project for bird science.
+
+Our modeling goal is to predict whether a bird feeder site will be used by squirrels, based on other characteristics of the bird feeder site like the surrounding yard and habitat. 
+
+
+## Explore data 
+
+Let's look at data:
+
+```{r}
+library(tidyverse)
+
+site_data <- read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2023/2023-01-10/PFW_count_site_data_public_2021.csv') %>%
+  mutate(squirrels = ifelse(squirrels, "squirrels", "no squirrels"))
+
+glimpse(site_data)
+```
+
+What about the outcome?
+
+```{r}
+site_data %>%
+  count(squirrels)
+```
+
+How are other characteristics of these sites related to the habitat
+
+```{r}
+site_data %>%
+  filter(!is.na(squirrels)) %>%
+  group_by(squirrels) %>%
+  summarise(across(contains("hab"), mean, na.rm = TRUE)) %>%
+  pivot_longer(contains("hab")) %>%
+  mutate(name = str_remove(name, "hab_")) %>%
+  ggplot(aes(value, fct_reorder(name, value), fill = squirrels)) +
+  geom_col(alpha = 0.8, position = "dodge") +
+  scale_x_continuous(labels = scales::percent) +
+  labs(x = "% of locations", y = NULL, fill = NULL) 
+```
+
+## Build a model
+
+Here we are spending your data budget by splitting our data into training and testing sets, and creating cross-validation samples (Not using spatial resampling would mean that our estimates of performance are too optimistic for new data).
+
+```{r}
+library(tidymodels)
+
+set.seed(2023)
+feeder_split <- site_data %>%
+  filter(!is.na(squirrels)) %>%
+  select(where(~!all(is.na(.x)))) %>%
+  select(-loc_id, -proj_period_id, -fed_yr_round) %>%
+  select(squirrels, everything()) %>%
+  initial_split(strata = squirrels)
+
+feeder_train <- training(feeder_split)
+feeder_test <- testing(feeder_split)
+
+set.seed(2023)
+feeder_folds <- vfold_cv(feeder_train, strata = squirrels)
+feeder_folds
+```
+
+
+
+## #  10-fold cross-validation using stratification 
+## # A tibble: 10 × 2
+##    splits                 id    
+##    <list>                 <chr> 
+##  1 <split [159085/17678]> Fold01
+##  2 <split [159086/17677]> Fold02
+##  3 <split [159087/17676]> Fold03
+##  4 <split [159087/17676]> Fold04
+##  5 <split [159087/17676]> Fold05
+##  6 <split [159087/17676]> Fold06
+##  7 <split [159087/17676]> Fold07
+##  8 <split [159087/17676]> Fold08
+##  9 <split [159087/17676]> Fold09
+## 10 <split [159087/17676]> Fold10
+
+Here's what we need to handler in our feature engineering recipe:
+- There are a lot of NA values, we will impute these using the mean value for each of the variables.
+- Some variables may have near-zero variance, we will remove them.
+- Class imbalance in the output, we want to compare with/without downsampling.
+
+```{r}
+basic_rec <- 
+  recipe(squirrels ~ ., data = feeder_train) %>%
+  step_impute_mean(all_numeric_predictors()) %>%
+  step_nzv(all_numeric_predictors())
+
+basic_rec %>% prep() %>% juice() %>% glimpse()
+```
+
+```{r}
+downsampling_rec <- basic_rec %>% themis::step_downsample(squirrels)
+
+prep(downsampling_rec) %>% juice() %>% glimpse()
+```
+
+
+Let's find out what features are important by tuning a logistic regression with lasso penalty (coefficients of some less contributive variables are forced to be exactly zero):
+
+```{r}
+lasso_spec <- 
+  logistic_reg(penalty = tune(), mixture = 1) %>%
+  set_engine("glmnet")
+
+wf_set <- workflow_set(
+    list(
+        basic = basic_rec,
+        downsampling = downsampling_rec
+    ),
+    list(
+        glmnet = lasso_spec
+    )
+)
+
+wf_set
+```
+
+  
+```{r}
+cl <- jrrosell::startParallel("1nr tuning processing", max = 5, min = 2)
+set.seed(2023)
+tune_rs <- workflow_map(
+    wf_set,
+    "tune_grid",
+    resamples = feeder_folds,
+    grid = 15,
+    metrics = metric_set(accuracy, mn_log_loss, sensitivity, specificity),
+)
+jrrosell::stopParallel(cl)
+```
+
+```{r}
+tune_rs %>% autoplot()
+```
+
+```{r}
+narrower_penalty <- penalty(range = c(-3, 0))
+cl <- jrrosell::startParallel("2 tuning processing", max = 5, min = 2)
+set.seed(2023)
+tune_rs <- workflow_map(
+    wf_set,
+    "tune_grid",
+    resamples = feeder_folds,
+    grid = 15,
+    metrics = metric_set(accuracy, mn_log_loss, sensitivity, specificity),
+    param_info = parameters(narrower_penalty)
+)
+jrrosell::stopParallel(cl)
+
+```
+
+We only have two elements in our set here, but you can use lots! Let’s use tuning to evaluate different possible penalty values for each option, and let’s be sure to include several metrics so we can understand the model performance thoroughly.
+
+narrower_penalty <- penalty(range = c(-3, 0))
+
+doParallel::registerDoParallel()
+set.seed(345)
+tune_rs <- 
+  workflow_map(
+    wf_set,
+    "tune_grid",
+    resamples = feeder_folds,
+    grid = 15,
+    metrics = metric_set(accuracy, mn_log_loss, sensitivity, specificity),
+    param_info = parameters(narrower_penalty)
+  )
+
+tune_rs
+
+## # A workflow set/tibble: 2 × 4
+##   wflow_id            info             option    result   
+##   <chr>               <list>           <list>    <list>   
+## 1 basic_glmnet        <tibble [1 × 4]> <opts[4]> <tune[+]>
+## 2 downsampling_glmnet <tibble [1 × 4]> <opts[4]> <tune[+]>
+
